@@ -27,6 +27,7 @@ import org.apache.spark.sql.catalyst.plans.logical.LogicalPlan
 import org.apache.spark.sql.catalyst.rules.Rule
 import org.apache.spark.sql.execution.{QueryExecution, SparkOptimizer, SparkPlanner, SparkSqlParser}
 import org.apache.spark.sql.execution.datasources._
+import org.apache.spark.sql.execution.datasources.v2.V2WriteSupportCheck
 import org.apache.spark.sql.streaming.StreamingQueryManager
 import org.apache.spark.sql.util.ExecutionListenerManager
 
@@ -159,6 +160,7 @@ abstract class BaseSessionStateBuilder(
     override val extendedResolutionRules: Seq[Rule[LogicalPlan]] =
       new FindDataSourceTable(session) +:
         new ResolveSQLOnFile(session) +:
+        new FallbackOrcDataSourceV2(session) +:
         customResolutionRules
 
     override val postHocResolutionRules: Seq[Rule[LogicalPlan]] =
@@ -171,6 +173,7 @@ abstract class BaseSessionStateBuilder(
       PreWriteCheck +:
         PreReadCheck +:
         HiveOnlyCheck +:
+        V2WriteSupportCheck +:
         customCheckRules
   }
 
@@ -309,13 +312,14 @@ private[sql] trait WithTestConf { self: BaseSessionStateBuilder =>
   def overrideConfs: Map[String, String]
 
   override protected lazy val conf: SQLConf = {
+    val overrideConfigurations = overrideConfs
     val conf = parentState.map(_.conf.clone()).getOrElse {
       new SQLConf {
         clear()
         override def clear(): Unit = {
           super.clear()
           // Make sure we start with the default test configs even after clear
-          overrideConfs.foreach { case (key, value) => setConfString(key, value) }
+          overrideConfigurations.foreach { case (key, value) => setConfString(key, value) }
         }
       }
     }

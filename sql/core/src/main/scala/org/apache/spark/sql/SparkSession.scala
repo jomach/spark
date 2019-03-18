@@ -18,9 +18,11 @@
 package org.apache.spark.sql
 
 import java.io.Closeable
+import java.util.concurrent.TimeUnit._
 import java.util.concurrent.atomic.AtomicReference
 
 import scala.collection.JavaConverters._
+import scala.collection.mutable
 import scala.reflect.runtime.universe.TypeTag
 import scala.util.control.NonFatal
 
@@ -31,6 +33,7 @@ import org.apache.spark.internal.Logging
 import org.apache.spark.rdd.RDD
 import org.apache.spark.scheduler.{SparkListener, SparkListenerApplicationEnd}
 import org.apache.spark.sql.catalog.Catalog
+import org.apache.spark.sql.catalog.v2.{CatalogPlugin, Catalogs}
 import org.apache.spark.sql.catalyst._
 import org.apache.spark.sql.catalyst.analysis.UnresolvedRelation
 import org.apache.spark.sql.catalyst.encoders._
@@ -93,7 +96,7 @@ class SparkSession private(
   private[sql] def this(sc: SparkContext) {
     this(sc, None, None,
       SparkSession.applyExtensions(
-        sc.getConf.get(StaticSQLConf.SPARK_SESSION_EXTENSIONS),
+        sc.getConf.get(StaticSQLConf.SPARK_SESSION_EXTENSIONS).getOrElse(Seq.empty),
         new SparkSessionExtensions))
   }
 
@@ -127,7 +130,7 @@ class SparkSession private(
   @Unstable
   @transient
   lazy val sharedState: SharedState = {
-    existingSharedState.getOrElse(new SharedState(sparkContext))
+    existingSharedState.getOrElse(new SharedState(sparkContext, initialSessionOptions))
   }
 
   /**
@@ -619,6 +622,12 @@ class SparkSession private(
    */
   @transient lazy val catalog: Catalog = new CatalogImpl(self)
 
+  @transient private lazy val catalogs = new mutable.HashMap[String, CatalogPlugin]()
+
+  private[sql] def catalog(name: String): CatalogPlugin = synchronized {
+    catalogs.getOrElseUpdate(name, Catalogs.load(name, sessionState.conf))
+  }
+
   /**
    * Returns the specified table/view as a `DataFrame`.
    *
@@ -690,7 +699,7 @@ class SparkSession private(
     val ret = f
     val end = System.nanoTime()
     // scalastyle:off println
-    println(s"Time taken: ${(end - start) / 1000 / 1000} ms")
+    println(s"Time taken: ${NANOSECONDS.toMillis(end - start)} ms")
     // scalastyle:on println
     ret
   }
@@ -950,7 +959,7 @@ object SparkSession extends Logging {
         }
 
         applyExtensions(
-          sparkContext.getConf.get(StaticSQLConf.SPARK_SESSION_EXTENSIONS),
+          sparkContext.getConf.get(StaticSQLConf.SPARK_SESSION_EXTENSIONS).getOrElse(Seq.empty),
           extensions)
 
         session = new SparkSession(sparkContext, None, None, extensions)
@@ -1138,14 +1147,13 @@ object SparkSession extends Logging {
   }
 
   /**
-   * Initialize extensions for given extension classname. This class will be applied to the
+   * Initialize extensions for given extension classnames. The classes will be applied to the
    * extensions passed into this function.
    */
   private def applyExtensions(
-      extensionOption: Option[String],
+      extensionConfClassNames: Seq[String],
       extensions: SparkSessionExtensions): SparkSessionExtensions = {
-    if (extensionOption.isDefined) {
-      val extensionConfClassName = extensionOption.get
+    extensionConfClassNames.foreach { extensionConfClassName =>
       try {
         val extensionConfClass = Utils.classForName(extensionConfClassName)
         val extensionConf = extensionConfClass.getConstructor().newInstance()
