@@ -21,6 +21,7 @@ import java.io.{DataOutputStream, FileNotFoundException}
 import java.net.{ConnectException, HttpURLConnection, SocketException, URL}
 import java.nio.charset.StandardCharsets
 import java.util.concurrent.TimeoutException
+
 import javax.servlet.http.HttpServletResponse
 
 import scala.collection.mutable
@@ -28,11 +29,11 @@ import scala.concurrent.{Await, Future}
 import scala.concurrent.duration._
 import scala.io.Source
 import scala.util.control.NonFatal
-
 import com.fasterxml.jackson.core.JsonProcessingException
-
-import org.apache.spark.{SPARK_VERSION => sparkVersion, SparkConf, SparkException}
+import javax.net.ssl.SSLException
+import org.apache.spark.{SparkConf, SparkException, SPARK_VERSION => sparkVersion}
 import org.apache.spark.deploy.SparkApplication
+import org.apache.spark.deploy.rest.HttpProtocolType.HttpProtocolType
 import org.apache.spark.internal.Logging
 import org.apache.spark.util.Utils
 
@@ -72,6 +73,43 @@ private[spark] class RestSubmissionClient(master: String) extends Logging {
   // Set of masters that lost contact with us, used to keep track of
   // whether there are masters still alive for us to communicate with
   private val lostMasters = new mutable.HashSet[String]
+
+  private val typeOfHttpProtocol: HttpProtocolType = detectProtocolType
+
+  /**
+   * detects the type of protocol https or http
+   * @param master the url to test
+   * @return https or http enum
+   */
+  private def detectProtocolType: HttpProtocolType = {
+    try {
+      val masterUrl = masters.map{ master =>
+        var rawMaster: Option[String] = None
+        supportedMasterPrefixes.foreach { prefix =>
+            if (master.startsWith(prefix)) {
+               rawMaster = Some(s"https://" + master.stripPrefix(prefix).stripSuffix("/"))
+            }
+        }
+        rawMaster
+      }.toList.flatten
+
+      masterUrl.map{ master =>
+        val testUrl = new URL(master)
+        val conn = testUrl.openConnection().asInstanceOf[HttpURLConnection]
+        conn.connect()
+        if (conn.getResponseCode >= 200 && conn.getResponseCode < 400) {
+          logDebug(s"Successfully connected via https to $masterUrl ")
+          HttpProtocolType.HTTPS
+        } else {
+          HttpProtocolType.HTTP
+        }
+      }.head
+
+    } catch {
+      // use the http endpoint because https failed
+      case _: Exception => HttpProtocolType.HTTP
+    }
+  }
 
   /**
    * Submit an application specified by the parameters in the provided request.
@@ -315,7 +353,8 @@ private[spark] class RestSubmissionClient(master: String) extends Logging {
       }
     }
     masterUrl = masterUrl.stripSuffix("/")
-    s"http://$masterUrl/$PROTOCOL_VERSION/submissions"
+    val httpProtocol = typeOfHttpProtocol.toString
+    s"$httpProtocol$masterUrl/$PROTOCOL_VERSION/submissions"
   }
 
   /** Throw an exception if this is not standalone mode. */
@@ -405,6 +444,12 @@ private[spark] class RestSubmissionClient(master: String) extends Logging {
     }
     lostMasters.size >= masters.length
   }
+}
+
+private[spark] object HttpProtocolType extends Enumeration {
+  type HttpProtocolType = Value
+  val HTTP = Value("http://")
+  val HTTPS = Value("https://")
 }
 
 private[spark] object RestSubmissionClient {

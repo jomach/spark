@@ -18,16 +18,15 @@
 package org.apache.spark.deploy.rest
 
 import java.io.DataOutputStream
-import java.net.{HttpURLConnection, URL}
+import java.net.{HttpURLConnection, URL, UnknownHostException}
 import java.nio.charset.StandardCharsets
+
 import javax.servlet.http.HttpServletResponse
 
 import scala.collection.mutable
-
 import org.json4s.JsonAST._
 import org.json4s.jackson.JsonMethods._
 import org.scalatest.BeforeAndAfterEach
-
 import org.apache.spark._
 import org.apache.spark.deploy.{SparkSubmit, SparkSubmitArguments}
 import org.apache.spark.deploy.DeployMessages._
@@ -226,6 +225,14 @@ class StandaloneRestSubmitSuite extends SparkFunSuite with BeforeAndAfterEach {
     val statusResponse = getStatusResponse(response2)
     assert(!statusResponse.success)
     assert(statusResponse.submissionId === doesNotExist)
+  }
+
+  test("test that selecting the http or https protocol does fail") {
+    val httpUrl = "mesos://somethingThatdoesNotExit.com:5050"
+    val doesNotExist = "does-not-exist"
+    val client = new RestSubmissionClient(httpUrl)
+    // just run that we know that is going to fail
+    assertThrows[SparkException](client.killSubmission(doesNotExist))
   }
 
   /* ---------------------------------------- *
